@@ -1,3 +1,23 @@
-numpy
-scikit-learn
-pytest
+# Core backend dependencies (production)
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.38
+pydantic==2.10.6
+
+# Recommendation algorithms
+numpy==2.2.2
+scikit-learn==1.6.1
+
+# Logging support
+python-json-logger==2.0.7
+
+# Testing
+pytest==8.3.4
+
+# Optional: caching
+redis==5.2.1
+cachetools==5.5.1
+
+# Optional: data analysis and visualization
+pandas==2.2.3
+matplotlib==3.10.0
