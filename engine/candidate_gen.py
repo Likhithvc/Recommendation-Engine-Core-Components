@@ -25,7 +25,11 @@ class CandidateGenerator:
         self,
         user_items: Dict[int, List[int]],
         item_similarities: Dict[int, List[int]],
-        item_popularity: Dict[int, float]
+        item_popularity: Dict[int, float],
+        user_recent_items: Dict[int, List[int]] | None = None,
+        item_categories: Dict[int, str] | None = None,
+        user_preferred_category: Dict[int, str] | None = None,
+        category_popularity: Dict[str, Dict[int, float]] | None = None,
     ):
         """
         Initialize the CandidateGenerator with data dictionaries.
@@ -38,6 +42,39 @@ class CandidateGenerator:
         self.user_items = user_items
         self.item_similarities = item_similarities
         self.item_popularity = item_popularity
+        self.user_recent_items = user_recent_items or {}
+        self.item_categories = item_categories or {}
+        self.user_preferred_category = user_preferred_category or {}
+        self.category_popularity = category_popularity or {}
+
+    def _get_recent_history(self, user_id: int, window: int = 3) -> List[int]:
+        recent = self.user_recent_items.get(user_id)
+        if recent:
+            return recent[:window]
+        return list(reversed(self.user_items.get(user_id, [])))[:window]
+
+    def _priority_score(self, user_id: int, item_id: int, base_score: float = 1.0) -> float:
+        score = float(base_score)
+        preferred_category = self.user_preferred_category.get(user_id)
+        item_category = self.item_categories.get(item_id)
+
+        if preferred_category and item_category == preferred_category:
+            score *= 1.35
+        elif preferred_category and item_category and item_category != preferred_category:
+            score *= 0.8
+
+        if item_id in set(self._get_recent_history(user_id, window=3)):
+            score *= 1.1
+
+        return score
+
+    @staticmethod
+    def _ordered_ids(scored_items: Dict[int, float], top_n: int | None = None) -> List[int]:
+        ranked = sorted(scored_items.items(), key=lambda pair: pair[1], reverse=True)
+        ids = [item_id for item_id, _score in ranked]
+        if top_n is None:
+            return ids
+        return ids[:top_n]
     
     def _get_user_history(self, user_id: int) -> Set[int]:
         """
@@ -76,26 +113,33 @@ class CandidateGenerator:
         if not user_history:
             return []
         
+        recent_items = self._get_recent_history(user_id, window=3)
+
         # Find similar users (those who share at least one item)
-        similar_users: List[int] = []
+        similar_users: List[tuple[int, float]] = []
         for other_user_id, other_items in self.user_items.items():
             if other_user_id == user_id:
                 continue
             
             other_items_set = set(other_items)
             # Check if there's overlap between users
-            if user_history.intersection(other_items_set):
-                similar_users.append(other_user_id)
+            overlap = user_history.intersection(other_items_set)
+            if overlap:
+                recent_overlap = len(set(recent_items).intersection(other_items_set))
+                similarity_weight = len(overlap) + (recent_overlap * 1.5)
+                similar_users.append((other_user_id, similarity_weight))
         
         # Collect candidate items from similar users
-        candidates: Set[int] = set()
-        for similar_user_id in similar_users:
+        candidate_scores: Dict[int, float] = {}
+        for similar_user_id, user_weight in similar_users:
             similar_user_items = set(self.user_items.get(similar_user_id, []))
             # Add items the similar user has but current user hasn't seen
             new_items = similar_user_items - user_history
-            candidates.update(new_items)
+            for item_id in new_items:
+                boosted_score = self._priority_score(user_id, item_id, base_score=user_weight)
+                candidate_scores[item_id] = candidate_scores.get(item_id, 0.0) + boosted_score
         
-        return list(candidates)
+        return self._ordered_ids(candidate_scores)
     
     def content_based_candidates(self, user_id: int) -> List[int]:
         """
@@ -123,17 +167,29 @@ class CandidateGenerator:
             return []
         
         # Find similar items for each item in user's history
-        candidates: Set[int] = set()
+        recent_items = self._get_recent_history(user_id, window=3)
+        recent_set = set(recent_items)
+        candidate_scores: Dict[int, float] = {}
+
         for item_id in user_history:
             similar_items = self.item_similarities.get(item_id, [])
-            candidates.update(similar_items)
+            source_weight = 1.8 if item_id in recent_set else 1.0
+            for rank_index, similar_id in enumerate(similar_items, start=1):
+                rank_weight = 1.0 / rank_index
+                boosted = self._priority_score(
+                    user_id,
+                    similar_id,
+                    base_score=source_weight * rank_weight,
+                )
+                candidate_scores[similar_id] = candidate_scores.get(similar_id, 0.0) + boosted
         
         # Remove items the user has already seen
-        candidates = candidates - user_history
+        for seen_item in user_history:
+            candidate_scores.pop(seen_item, None)
         
-        return list(candidates)
+        return self._ordered_ids(candidate_scores)
     
-    def popularity_candidates(self, top_n: int = 20) -> List[int]:
+    def popularity_candidates(self, top_n: int = 20, user_id: int | None = None) -> List[int]:
         """
         Generate candidates based on popularity.
         
@@ -150,9 +206,16 @@ class CandidateGenerator:
             >>> gen.popularity_candidates(top_n=5)
             [10, 8, 5, 3, 1]
         """
+        popularity_source = self.item_popularity
+
+        if user_id is not None:
+            preferred_category = self.user_preferred_category.get(user_id)
+            if preferred_category and preferred_category in self.category_popularity:
+                popularity_source = self.category_popularity[preferred_category]
+
         # Sort items by popularity score (descending)
         sorted_items = sorted(
-            self.item_popularity.items(),
+            popularity_source.items(),
             key=lambda x: x[1],
             reverse=True
         )
@@ -187,7 +250,7 @@ class CandidateGenerator:
         # Collect candidates from all methods
         collaborative = self.collaborative_candidates(user_id)
         content_based = self.content_based_candidates(user_id)
-        popularity = self.popularity_candidates(top_n=top_n)
+        popularity = self.popularity_candidates(top_n=top_n, user_id=user_id)
         
         # Combine results maintaining priority order
         # Use a list to preserve order, track seen items with a set
@@ -216,7 +279,7 @@ class CandidateGenerator:
         return combined[:top_n]
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     # Sample data for testing
     print("=" * 50)
     print("CandidateGenerator - Example Test Cases")

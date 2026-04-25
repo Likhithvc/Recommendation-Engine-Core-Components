@@ -13,9 +13,9 @@ Usage:
 
 from typing import Any, Dict, List
 
-from similarity import SimilarityCalculator
-from candidate_gen import CandidateGenerator
-from scorer import RecommendationScorer
+from engine.similarity import SimilarityCalculator
+from engine.candidate_gen import CandidateGenerator
+from engine.scorer import RecommendationScorer
 
 
 class RecommenderEngine:
